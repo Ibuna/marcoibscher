@@ -1,13 +1,27 @@
 import { QdrantClient } from "@qdrant/js-client-rest";
+import fs from 'fs';
+import path from 'path';
+import pdfParse from 'pdf-parse';
+import mammoth from 'mammoth';
 
-// Beispiel-Dokument
-const document = "Dies ist ein Beispieltext, der in kleinere Chunks zerlegt und in die Qdrant-Datenbank eingefügt werden soll.";
+// Funktion zum Lesen von PDF-Dateien
+async function readPdf(filePath: string): Promise<string> {
+    const dataBuffer = fs.readFileSync(filePath);
+    const data = await pdfParse(dataBuffer);
+    return data.text;
+}
 
-// Funktion zum Zerlegen des Dokuments in Chunks
-function chunkDocument(doc: string, chunkSize: number): string[] {
+// Funktion zum Lesen von Word-Dokumenten
+async function readWord(filePath: string): Promise<string> {
+    const data = await mammoth.extractRawText({ path: filePath });
+    return data.value;
+}
+
+// Funktion zum Zerlegen des Textes in Chunks
+function chunkText(text: string, chunkSize: number): string[] {
     const chunks = [];
-    for (let i = 0; i < doc.length; i += chunkSize) {
-        chunks.push(doc.slice(i, i + chunkSize));
+    for (let i = 0; i < text.length; i += chunkSize) {
+        chunks.push(text.slice(i, i + chunkSize));
     }
     return chunks;
 }
@@ -39,16 +53,36 @@ async function main() {
         }
     }
 
-    // Zerlege das Dokument in Chunks
-    const chunks = chunkDocument(document, 20);
+    // Verzeichnis mit den Dokumenten
+    const documentsDir = './documents';
+    const files = fs.readdirSync(documentsDir);
 
-    // Erstelle die Vektoren für die Chunks
+    const allChunks: { id: number, vector: number[], payload: { text: string } }[] = [];
+    let idCounter = 1;
     const vectorSize = 20; // Feste Länge der Vektoren
-    const points = chunks.map((chunk, index) => ({
-        id: index + 1,
-        vector: embedChunk(chunk, vectorSize),
-        payload: { text: chunk }
-    }));
+
+    for (const file of files) {
+        const filePath = path.join(documentsDir, file);
+        let text = '';
+
+        if (file.endsWith('.pdf')) {
+            text = await readPdf(filePath);
+        } else if (file.endsWith('.docx')) {
+            text = await readWord(filePath);
+        } else {
+            console.log(`Unsupported file type: ${file}`);
+            continue;
+        }
+
+        const chunks = chunkText(text, 1000); // Zerlege den Text in Chunks von 1000 Zeichen
+        const points = chunks.map((chunk) => ({
+            id: idCounter++,
+            vector: embedChunk(chunk, vectorSize),
+            payload: { text: chunk }
+        }));
+
+        allChunks.push(...points);
+    }
 
     // Füge die Chunks in die Qdrant-Datenbank ein
     await client.createCollection("document_chunks", {
@@ -57,7 +91,7 @@ async function main() {
 
     const operationInfo = await client.upsert("document_chunks", {
         wait: true,
-        points: points,
+        points: allChunks,
     });
 
     console.debug(operationInfo);

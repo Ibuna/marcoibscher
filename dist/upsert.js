@@ -8,15 +8,35 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 const js_client_rest_1 = require("@qdrant/js-client-rest");
-// Beispiel-Dokument
-const document = "Dies ist ein Beispieltext, der in kleinere Chunks zerlegt und in die Qdrant-Datenbank eingefügt werden soll.";
-// Funktion zum Zerlegen des Dokuments in Chunks
-function chunkDocument(doc, chunkSize) {
+const fs_1 = __importDefault(require("fs"));
+const path_1 = __importDefault(require("path"));
+const pdf_parse_1 = __importDefault(require("pdf-parse"));
+const mammoth_1 = __importDefault(require("mammoth"));
+// Funktion zum Lesen von PDF-Dateien
+function readPdf(filePath) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const dataBuffer = fs_1.default.readFileSync(filePath);
+        const data = yield (0, pdf_parse_1.default)(dataBuffer);
+        return data.text;
+    });
+}
+// Funktion zum Lesen von Word-Dokumenten
+function readWord(filePath) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const data = yield mammoth_1.default.extractRawText({ path: filePath });
+        return data.value;
+    });
+}
+// Funktion zum Zerlegen des Textes in Chunks
+function chunkText(text, chunkSize) {
     const chunks = [];
-    for (let i = 0; i < doc.length; i += chunkSize) {
-        chunks.push(doc.slice(i, i + chunkSize));
+    for (let i = 0; i < text.length; i += chunkSize) {
+        chunks.push(text.slice(i, i + chunkSize));
     }
     return chunks;
 }
@@ -48,22 +68,40 @@ function main() {
                 throw error;
             }
         }
-        // Zerlege das Dokument in Chunks
-        const chunks = chunkDocument(document, 20);
-        // Erstelle die Vektoren für die Chunks
+        // Verzeichnis mit den Dokumenten
+        const documentsDir = './documents';
+        const files = fs_1.default.readdirSync(documentsDir);
+        const allChunks = [];
+        let idCounter = 1;
         const vectorSize = 20; // Feste Länge der Vektoren
-        const points = chunks.map((chunk, index) => ({
-            id: index + 1,
-            vector: embedChunk(chunk, vectorSize),
-            payload: { text: chunk }
-        }));
+        for (const file of files) {
+            const filePath = path_1.default.join(documentsDir, file);
+            let text = '';
+            if (file.endsWith('.pdf')) {
+                text = yield readPdf(filePath);
+            }
+            else if (file.endsWith('.docx')) {
+                text = yield readWord(filePath);
+            }
+            else {
+                console.log(`Unsupported file type: ${file}`);
+                continue;
+            }
+            const chunks = chunkText(text, 1000); // Zerlege den Text in Chunks von 1000 Zeichen
+            const points = chunks.map((chunk) => ({
+                id: idCounter++,
+                vector: embedChunk(chunk, vectorSize),
+                payload: { text: chunk }
+            }));
+            allChunks.push(...points);
+        }
         // Füge die Chunks in die Qdrant-Datenbank ein
         yield client.createCollection("document_chunks", {
             vectors: { size: vectorSize, distance: "Dot" },
         });
         const operationInfo = yield client.upsert("document_chunks", {
             wait: true,
-            points: points,
+            points: allChunks,
         });
         console.debug(operationInfo);
     });
