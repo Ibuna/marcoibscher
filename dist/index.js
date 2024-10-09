@@ -61,3 +61,4 @@ function upsertPoints(client) {
     });
 }
 main().catch(console.error);
+//# sourceMappingURL=index.js.map

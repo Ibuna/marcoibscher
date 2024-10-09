@@ -1,8 +1,19 @@
-import { QdrantClient } from "@qdrant/js-client-rest";
 import fs from 'fs';
 import path from 'path';
 import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
+import { split } from 'sentence-splitter';
+import OpenAIApi from 'openai';
+import dotenv from 'dotenv';
+dotenv.config();
+
+// Manuelle Definition der Typen
+interface TxtNode {
+    type: string;
+    raw: string;
+    value?: string;
+    children?: TxtNode[];
+}
 
 // Funktion zum Lesen von PDF-Dateien
 async function readPdf(filePath: string): Promise<string> {
@@ -17,49 +28,86 @@ async function readWord(filePath: string): Promise<string> {
     return data.value;
 }
 
-// Funktion zum Zerlegen des Textes in Chunks
-function chunkText(text: string, chunkSize: number): string[] {
-    const chunks = [];
-    for (let i = 0; i < text.length; i += chunkSize) {
-        chunks.push(text.slice(i, i + chunkSize));
-    }
-    return chunks;
+// Funktion zum Zerlegen des Textes in Sätze
+function splitTextIntoSentences(text: string): string[] {
+    const result = split(text);
+    return result
+        .filter((node: TxtNode) => node.type === 'Sentence')
+        .map((node: TxtNode) => node.raw);
 }
 
-// Beispiel-Funktion zum Umwandeln eines Chunks in einen Vektor (Dummy-Implementierung)
-function embedChunk(chunk: string, vectorSize: number): number[] {
-    // Hier solltest du ein echtes Embedding-Modell verwenden
-    const vector = new Array(vectorSize).fill(0);
-    chunk.split('').forEach((char, index) => {
-        if (index < vectorSize) {
-            vector[index] = char.charCodeAt(0) / 255;
+/// Funktion zum Erstellen von semantischen Chunks mit OpenAI GPT-3.5
+async function createSemanticChunksWithGPT(text: string, chunkSize: number, openai: OpenAIApi): Promise<{ key: string, content: string }[]> {
+    let prompt = `
+        Teile den folgenden Text in sinnvolle Chunks von maximal ${chunkSize} Zeichen und gib sie in einem JSON-Format zurück. Jedes Chunk-Objekt soll nur den Chunk-Text enthalten und als Key eine fortlaufende Zahl haben. Der gesamte Text, einschließlich Auflistungen und aller anderen Teile, soll in den Chunks verarbeitet werden. Es soll nichts verloren gehen.
+
+        Text:
+        ${text}
+
+        Beispiel für das gewünschte JSON-Format:
+        {
+        "1": "Erster Chunk-Text...",
+        "2": "Zweiter Chunk-Text...",
+        "3": "Dritter Chunk-Text..."
         }
+    `;
+
+    prompt = cleanText(prompt);
+
+    // Berechne die Anzahl der Token im Prompt
+    const promptTokens = prompt.split(/\s+/).length;
+
+    // Setze die maximale Anzahl von Token für die Antwort
+    const maxTokens = 4096 - promptTokens;
+
+    const response = await openai.chat.completions.create({
+        model: "gpt-3.5-turbo",
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: maxTokens
     });
-    return vector;
+
+    const messageContent = response.choices[0].message?.content;
+    if (messageContent) {
+        try {
+            const cleanedJsonString = cleanText(messageContent);
+            const chunksObject = JSON.parse(cleanedJsonString);
+            if (typeof chunksObject === 'object' && chunksObject !== null) {
+                const chunks = Object.entries(chunksObject).map(([key, content]) => ({
+                    key,
+                    content: content as string
+                }));
+                return chunks;
+            } else {
+                console.error("Die Antwort ist kein gültiges Objekt:", messageContent);
+                return [];
+            }
+        } catch (error) {
+            console.error("Fehler beim Parsen der JSON-Antwort: " + messageContent, error);
+            return [];
+        }
+    } else {
+        console.error("Keine Antwort von der OpenAI API erhalten.");
+        return [];
+    }
 }
+
+function cleanText(text: string): string {
+    return text
+        .replace(/\\u00[0-9a-fA-F]{2}/g, '') // Entferne Unicode-Escape-Sequenzen
+        .replace(/\n+/g, '\n') // Reduziere mehrere aufeinanderfolgende Zeilenumbrüche auf einen einzigen
+        .replace(/\s+/g, ' ') // Reduziere mehrere Leerzeichen auf ein einzelnes Leerzeichen
+        .trim(); // Entferne führende und nachfolgende Leerzeichen
+}
+
 
 async function main() {
-    const client = new QdrantClient({ host: "localhost", port: 6333 });
-
-    // Lösche die Collection, falls sie bereits existiert
-    try {
-        await client.deleteCollection("document_chunks");
-        console.log("Collection 'document_chunks' gelöscht.");
-    } catch (error) {
-        if (isApiError(error) && error.response?.status === 404) {
-            console.log("Collection 'document_chunks' existiert nicht.");
-        } else {
-            throw error;
-        }
-    }
+    const openai = new OpenAIApi({
+        apiKey: process.env.OPENAI_API_KEY,
+    });
 
     // Verzeichnis mit den Dokumenten
     const documentsDir = './documents';
     const files = fs.readdirSync(documentsDir);
-
-    const allChunks: { id: number, vector: number[], payload: { text: string } }[] = [];
-    let idCounter = 1;
-    const vectorSize = 20; // Feste Länge der Vektoren
 
     for (const file of files) {
         const filePath = path.join(documentsDir, file);
@@ -74,32 +122,11 @@ async function main() {
             continue;
         }
 
-        const chunks = chunkText(text, 1000); // Zerlege den Text in Chunks von 1000 Zeichen
-        const points = chunks.map((chunk) => ({
-            id: idCounter++,
-            vector: embedChunk(chunk, vectorSize),
-            payload: { text: chunk }
-        }));
+        const chunks = await createSemanticChunksWithGPT(text, 1000, openai); // Erstelle semantische Chunks von maximal 1000 Zeichen
 
-        allChunks.push(...points);
+        // Hier kannst du die Chunks weiterverarbeiten, z.B. in eine Datenbank einfügen
+        console.log(chunks);
     }
-
-    // Füge die Chunks in die Qdrant-Datenbank ein
-    await client.createCollection("document_chunks", {
-        vectors: { size: vectorSize, distance: "Dot" },
-    });
-
-    const operationInfo = await client.upsert("document_chunks", {
-        wait: true,
-        points: allChunks,
-    });
-
-    console.debug(operationInfo);
-}
-
-// Hilfsfunktion zur Überprüfung, ob es sich um einen ApiError handelt
-function isApiError(error: unknown): error is { response?: { status: number } } {
-    return typeof error === 'object' && error !== null && 'response' in error;
 }
 
 main().catch(console.error);
