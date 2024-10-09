@@ -5,6 +5,8 @@ import mammoth from 'mammoth';
 import { split } from 'sentence-splitter';
 import OpenAIApi from 'openai';
 import dotenv from 'dotenv';
+import axios from 'axios';
+import { QdrantClient } from '@qdrant/js-client-rest';
 dotenv.config();
 
 // Manuelle Definition der Typen
@@ -76,6 +78,22 @@ async function createSemanticChunksWithGPT(text: string, chunkSize: number, open
                     key,
                     content: content as string
                 }));
+
+                // Embed the chunks
+                const embeddings = await Promise.all(chunks.map(async chunk => {
+                    const embeddingResponse = await openai.embeddings.create({
+                        model: "text-embedding-ada-002",
+                        input: chunk.content
+                    });
+                    return {
+                        content: chunk.content,
+                        embedding: embeddingResponse.data[0].embedding
+                    };
+                }));
+
+                // Insert embeddings into Qdrant
+                await insertIntoQdrant(embeddings);
+
                 return chunks;
             } else {
                 console.error("Die Antwort ist kein gültiges Objekt:", messageContent);
@@ -93,17 +111,71 @@ async function createSemanticChunksWithGPT(text: string, chunkSize: number, open
 
 function cleanText(text: string): string {
     return text
-        .replace(/\\u00[0-9a-fA-F]{2}/g, '') // Entferne Unicode-Escape-Sequenzen
+        .replace(/\\u00[0-7][0-9a-fA-F]/g, '') // Entferne nur spezifische Unicode-Escape-Sequenzen, die keine Umlaute betreffen
         .replace(/\n+/g, '\n') // Reduziere mehrere aufeinanderfolgende Zeilenumbrüche auf einen einzigen
         .replace(/\s+/g, ' ') // Reduziere mehrere Leerzeichen auf ein einzelnes Leerzeichen
         .trim(); // Entferne führende und nachfolgende Leerzeichen
 }
 
+async function insertIntoQdrant(embeddings: { content: string, embedding: number[] }[]) {
+    const qdrantUrl = process.env.QDRANT_URL;
+    const collectionName = process.env.QDRANT_COLLECTION;
+
+    const client = new QdrantClient({ url: qdrantUrl });
+
+    if (!collectionName) {
+        throw new Error("QDRANT_COLLECTION is not defined in the environment variables.");
+    }
+
+    const points = embeddings.map((embedding, index) => ({
+        id: index + 1, // Ensure IDs start from 1
+        vector: embedding.embedding,
+        payload: { content: embedding.content }
+    }));
+
+    console.log("Points to be inserted:", JSON.stringify(points, null, 2)); // Debugging: Log the points
+
+    try {
+        const response = await client.upsert(collectionName, {
+            points
+        });
+        console.log("Qdrant response:", response); // Debugging: Log the response
+    } catch (error: any) {
+        console.error(`Error inserting into Qdrant: ${error.message}`);
+    }
+}
 
 async function main() {
     const openai = new OpenAIApi({
         apiKey: process.env.OPENAI_API_KEY,
     });
+
+    const qdrantUrl = process.env.QDRANT_URL;
+    const collectionName = process.env.QDRANT_COLLECTION;
+
+    // Check if collection exists
+    try {
+        await axios.get(`${qdrantUrl}/collections/${collectionName}`);
+        // If the collection exists, delete it
+        await axios.delete(`${qdrantUrl}/collections/${collectionName}`);
+        console.log(`Collection ${collectionName} deleted.`);
+    } catch (error: any) {
+        if (error.response && error.response.status === 404) {
+            console.log(`Collection ${collectionName} does not exist.`);
+        } else {
+            console.error("Error checking/deleting collection:", error);
+            return;
+        }
+    }
+
+    // Create a new collection
+    await axios.put(`${qdrantUrl}/collections/${collectionName}`, {
+        vectors: {
+            size: 1536, // Size of the embeddings
+            distance: "Cosine"
+        }
+    });
+    console.log(`Collection ${collectionName} created.`);
 
     // Verzeichnis mit den Dokumenten
     const documentsDir = './documents';

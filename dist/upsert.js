@@ -19,6 +19,8 @@ const mammoth_1 = __importDefault(require("mammoth"));
 const sentence_splitter_1 = require("sentence-splitter");
 const openai_1 = __importDefault(require("openai"));
 const dotenv_1 = __importDefault(require("dotenv"));
+const axios_1 = __importDefault(require("axios"));
+const js_client_rest_1 = require("@qdrant/js-client-rest");
 dotenv_1.default.config();
 // Funktion zum Lesen von PDF-Dateien
 function readPdf(filePath) {
@@ -59,11 +61,7 @@ function createSemanticChunksWithGPT(text, chunkSize, openai) {
         "3": "Dritter Chunk-Text..."
         }
     `;
-        prompt = prompt
-            .replace(/\\u00[0-9a-fA-F]{2}/g, '') // Entferne Unicode-Escape-Sequenzen
-            .replace(/\n+/g, '\n') // Reduziere mehrere aufeinanderfolgende Zeilenumbrüche auf einen einzigen
-            .replace(/\s+/g, ' ') // Reduziere mehrere Leerzeichen auf ein einzelnes Leerzeichen
-            .trim(); // Entferne führende und nachfolgende Leerzeichen
+        prompt = cleanText(prompt);
         // Berechne die Anzahl der Token im Prompt
         const promptTokens = prompt.split(/\s+/).length;
         // Setze die maximale Anzahl von Token für die Antwort
@@ -76,17 +74,26 @@ function createSemanticChunksWithGPT(text, chunkSize, openai) {
         const messageContent = (_a = response.choices[0].message) === null || _a === void 0 ? void 0 : _a.content;
         if (messageContent) {
             try {
-                const cleanedJsonString = messageContent
-                    .replace(/\\u00[0-9a-fA-F]{2}/g, '') // Entferne Unicode-Escape-Sequenzen
-                    .replace(/\n+/g, '\n') // Reduziere mehrere aufeinanderfolgende Zeilenumbrüche auf einen einzigen
-                    .replace(/\s+/g, ' ') // Reduziere mehrere Leerzeichen auf ein einzelnes Leerzeichen
-                    .trim(); // Entferne führende und nachfolgende Leerzeichen
+                const cleanedJsonString = cleanText(messageContent);
                 const chunksObject = JSON.parse(cleanedJsonString);
                 if (typeof chunksObject === 'object' && chunksObject !== null) {
                     const chunks = Object.entries(chunksObject).map(([key, content]) => ({
                         key,
                         content: content
                     }));
+                    // Embed the chunks
+                    const embeddings = yield Promise.all(chunks.map((chunk) => __awaiter(this, void 0, void 0, function* () {
+                        const embeddingResponse = yield openai.embeddings.create({
+                            model: "text-embedding-ada-002",
+                            input: chunk.content
+                        });
+                        return {
+                            content: chunk.content,
+                            embedding: embeddingResponse.data[0].embedding
+                        };
+                    })));
+                    // Insert embeddings into Qdrant
+                    yield insertIntoQdrant(embeddings);
                     return chunks;
                 }
                 else {
@@ -105,11 +112,80 @@ function createSemanticChunksWithGPT(text, chunkSize, openai) {
         }
     });
 }
+function cleanText(text) {
+    return text
+        .replace(/\\u00[0-7][0-9a-fA-F]/g, '') // Entferne nur spezifische Unicode-Escape-Sequenzen, die keine Umlaute betreffen
+        .replace(/\n+/g, '\n') // Reduziere mehrere aufeinanderfolgende Zeilenumbrüche auf einen einzigen
+        .replace(/\s+/g, ' ') // Reduziere mehrere Leerzeichen auf ein einzelnes Leerzeichen
+        .trim(); // Entferne führende und nachfolgende Leerzeichen
+}
+function insertIntoQdrant(embeddings) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const qdrantUrl = process.env.QDRANT_URL;
+        const collectionName = process.env.QDRANT_COLLECTION;
+        const client = new js_client_rest_1.QdrantClient({ url: qdrantUrl });
+        if (!collectionName) {
+            throw new Error("QDRANT_COLLECTION is not defined in the environment variables.");
+        }
+        const points = embeddings.map((embedding, index) => ({
+            id: index + 1, // Ensure IDs start from 1
+            vector: embedding.embedding,
+            payload: { content: embedding.content }
+        }));
+        console.log("Points to be inserted:", JSON.stringify(points, null, 2)); // Debugging: Log the points
+        try {
+            const response = yield client.upsert(collectionName, {
+                points
+            });
+            console.log("Qdrant response:", response); // Debugging: Log the response
+        }
+        catch (error) {
+            console.error(`Error inserting into Qdrant: ${error.message}`);
+        }
+    });
+}
 function main() {
     return __awaiter(this, void 0, void 0, function* () {
         const openai = new openai_1.default({
             apiKey: process.env.OPENAI_API_KEY,
         });
+        const qdrantUrl = process.env.QDRANT_URL;
+        const collectionName = process.env.QDRANT_COLLECTION;
+        // Check if collection exists
+        try {
+            yield axios_1.default.get(`${qdrantUrl}/collections/${collectionName}`);
+            // If the collection exists, delete it
+            yield axios_1.default.delete(`${qdrantUrl}/collections/${collectionName}`);
+            console.log(`Collection ${collectionName} deleted.`);
+        }
+        catch (error) {
+            if (error.response && error.response.status === 404) {
+                console.log(`Collection ${collectionName} does not exist.`);
+            }
+            else {
+                console.error("Error checking/deleting collection:", error);
+                return;
+            }
+        }
+        // Create a new collection
+        yield axios_1.default.put(`${qdrantUrl}/collections/${collectionName}`, {
+            vectors: {
+                size: 1536, // Size of the embeddings
+                distance: "Cosine"
+            }
+        });
+        console.log(`Collection ${collectionName} created.`);
+        /* Beispielinhalt erstellen
+        const exampleEmbeddings = [
+            {
+                content: "Dies ist ein Beispielinhalt.",
+                embedding: Array(1536).fill(0.5) // Beispiel-Embedding mit 1536 Dimensionen
+            }
+        ];
+    
+        // Beispielinhalt in Qdrant einfügen
+        await insertIntoQdrant(exampleEmbeddings);
+        */
         // Verzeichnis mit den Dokumenten
         const documentsDir = './documents';
         const files = fs_1.default.readdirSync(documentsDir);
@@ -126,7 +202,7 @@ function main() {
                 console.log(`Unsupported file type: ${file}`);
                 continue;
             }
-            const chunks = yield createSemanticChunksWithGPT(text, 1000, openai); // Erstelle semantische Chunks von 1000 Zeichen
+            const chunks = yield createSemanticChunksWithGPT(text, 1000, openai); // Erstelle semantische Chunks von maximal 1000 Zeichen
             // Hier kannst du die Chunks weiterverarbeiten, z.B. in eine Datenbank einfügen
             console.log(chunks);
         }
