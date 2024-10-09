@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Suchformular</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-100 text-gray-900 h-full">
+    <div class="flex flex-col min-h-screen">
+        <header class="bg-gray-800 text-white p-4 w-full">
+            <h1 class="text-2xl font-bold text-center">Suchformular</h1>
+        </header>
+        <main class="flex flex-col items-center justify-start flex-grow p-4 w-full pt-24">
+            <form class="w-full max-w-lg mb-4" id="searchForm">
+                <div class="flex items-center w-full">
+                    <input type="text" id="searchInput" class="flex-grow p-2 border border-gray-300 rounded-l-md" placeholder="Suchbegriff eingeben" required>
+                    <button type="submit" class="p-2 bg-gray-600 text-white border-gray-300 rounded-r-md">Suchen</button>
+                </div>
+            </form>
+            <div id="loadingIndicator" class="hidden flex items-center justify-center">
+                <div class="loader ease-linear rounded-full border-4 border-t-4 border-gray-200 h-12 w-12"></div>
+            </div>
+            <div id="answerText" class="max-w-6xl p-4 mt-12 bg-blue-100 border border-gray-300 rounded-md shadow-md opacity-0 transition-opacity duration-1000"></div>
+        </main>
+        <footer class="bg-gray-800 text-white p-4 text-center w-full">
+            <p>&copy; 2023 Dein Unternehmen</p>
+        </footer>
+    </div>
+
+    <style>
+        .loader {
+            border-top-color: #3498db;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+
+    <script>
+        document.getElementById('searchForm').addEventListener('submit', async function(event) {
+            event.preventDefault();
+            const searchTerm = document.getElementById('searchInput').value;
+            const loadingIndicator = document.getElementById('loadingIndicator');
+            const answerText = document.getElementById('answerText');
+
+            loadingIndicator.classList.remove('hidden');
+            answerText.classList.remove('opacity-100');
+
+            try {
+                const response = await fetch('/search', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ query: searchTerm })
+                });
+
+                const result = await response.json();
+
+                console.log(result);
+
+                answerText.textContent = result.answer; // Antwort anzeigen
+                answerText.classList.add('opacity-100'); // Antwort einblenden
+            } catch (error) {
+                console.error('Fehler bei der Suche:', error);
+            } finally {
+                loadingIndicator.classList.add('hidden');
+            }
+        });
+    </script>
+</body>
+</html>

@@ -175,17 +175,6 @@ function main() {
             }
         });
         console.log(`Collection ${collectionName} created.`);
-        /* Beispielinhalt erstellen
-        const exampleEmbeddings = [
-            {
-                content: "Dies ist ein Beispielinhalt.",
-                embedding: Array(1536).fill(0.5) // Beispiel-Embedding mit 1536 Dimensionen
-            }
-        ];
-    
-        // Beispielinhalt in Qdrant einfügen
-        await insertIntoQdrant(exampleEmbeddings);
-        */
         // Verzeichnis mit den Dokumenten
         const documentsDir = './documents';
         const files = fs_1.default.readdirSync(documentsDir);
